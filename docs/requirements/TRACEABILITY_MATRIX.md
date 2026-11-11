@@ -1,0 +1,261 @@
+# KinetiWall — Requirements Traceability Matrix (RTM)
+
+**Document Identifier:** KW-DOC-003  
+**Document Type:** Formal Requirements Traceability Matrix  
+**Current Phase:** Phase 1 — Project Research, Requirements & Feasibility  
+**Step:** Step 1 of 90 — Project Requirements Inventory & Traceability  
+**Status:** Approved Working Baseline  
+**Date:** 2026-11-08  
+
+---
+
+## 1. Overview & Traceability Methodology
+
+The **KinetiWall Requirements Traceability Matrix (RTM)** establishes an auditable bidirectional link between the authoritative project inputs (User Directives, Approved Decisions, Gemini Research Documents, Competitor Audits) and the technical requirements baseline (`KW-F`, `KW-NF`, and `KW-NG`).
+
+Each requirement is documented across 14 discrete engineering attributes:
+1. **ID**: Stable unique requirement identifier.
+2. **Title**: Human-readable descriptive name.
+3. **Statement**: Formal engineering requirement statement.
+4. **Source**: Originating authority or source document.
+5. **Source Ref**: Section or heading in source specification.
+6. **Classification**: `USER-REQUIRED`, `TECHNICAL-DECISION`, `RESEARCH-RECOMMENDATION`, `OPTIONAL-ENHANCEMENT`, `FUTURE-RELEASE`, `UNRESOLVED`, `NON-GOAL`.
+7. **Priority**: `P0` (Critical), `P1` (High), `P2` (Medium), `P3` (Low), `UNASSIGNED`.
+8. **Status**: `PLANNED`, `PROVISIONAL`, `IN_PROGRESS`, `VERIFIED`, `ACCEPTED`.
+9. **Rationale**: Engineering justification for requirement inclusion.
+10. **Acceptance Criteria**: Observable, testable operational criteria.
+11. **Verification Method**: Specific test protocol (Unit, Integration, Performance, Security, Manual).
+12. **Dependencies**: Upstream prerequisites and related components.
+13. **Risks & Constraints**: Platform, security, or performance hazards.
+14. **Related Architecture Decision**: Reference to architecture decisions and unresolved decision registers (`UDR-xxx`).
+
+---
+
+## 2. Functional Requirements Traceability Matrix (KW-F)
+
+### 2.1 Desktop Integration & Shell Layer
+
+| ID | Title | Statement | Source | Source Ref | Class | Pri | Status | Rationale | Acceptance Criteria | Verification Method | Dependencies | Risks & Constraints | Architecture Decision |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **KW-F-001** | Sub-Desktop Window Attachment | Render wallpaper behind desktop icons (`SysListView32`) while preserving icon selection, click, and desktop context menus. | User Brief | Sec 6.1 | USER-REQUIRED | P0 | PLANNED | Core live wallpaper desktop experience without obstructing shell usability. | Window HWND positioned beneath `SHELLDLL_DefView`; mouse drag-selection marquee and right-click menus function normally. | Win32 Z-order inspection (`GetWindow`) and synthetic mouse input testing. | Win32 User32 API | Relies on undocumented `0x052C` message to `Progman`. Microsoft provides no guarantee. | UDR-002 |
+| **KW-F-002** | Explorer Restart Recovery | Invalidate obsolete HWNDs, re-negotiate desktop attachment, and restore wallpaper within 2.0s when `explorer.exe` restarts. | User Brief | Sec 6.1 | USER-REQUIRED | P0 | PLANNED | Shell crashes and GPU driver resets restart Explorer; engine must not orphan windows or freeze. | Listens for `TaskbarCreated`; re-attaches within 2.0s of Explorer relaunch without leaking resources. | Shell kill test (`Stop-Process -Name explorer -Force`) during video playback; assert recovery. | KW-F-001, `RegisterWindowMessageW` | Rapid window creation during boot can cause race conditions; needs backoff. | UDR-002 |
+| **KW-F-003** | Attachment Fallback Mode | Log failure and safely fallback to borderless window or restore static wallpaper if WorkerW attachment fails. | Research Doc | Sec 6.1 | RESEARCH-RECOMMENDATION | P1 | PLANNED | Avoids application panic on third-party shells or restricted enterprise environments. | 3-attempt retry with 250ms backoff; restores original desktop wallpaper via `SystemParametersInfoW`. | Fault injection returning failure on WorkerW creation; assert clean fallback and log. | KW-F-001 | Fallback window may sit above desktop icons if WorkerW is rejected entirely. | UDR-002 |
+| **KW-F-004** | Desktop State Restoration on Exit | Close player windows and signal Windows shell to redraw original wallpaper upon shutdown or crash. | User Brief | Sec 6.1 | USER-REQUIRED | P0 | PLANNED | Prevents leaving black or frozen screens on user desktop upon exit. | Traps `WM_CLOSE`, `SIGTERM`; destroys windows; dispatches `RedrawWindow` / `SystemParametersInfoW`. | Termination test verifying desktop background displays default static wallpaper cleanly. | KW-F-001, KW-F-005 | Hard termination (`SIGKILL`) cannot run cleanup; requires watchdog supervisor. | UDR-003 |
+
+---
+
+### 2.2 Multi-Process Architecture & Supervision
+
+| ID | Title | Statement | Source | Source Ref | Class | Pri | Status | Rationale | Acceptance Criteria | Verification Method | Dependencies | Risks & Constraints | Architecture Decision |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **KW-F-005** | Core Controller Daemon | Native Rust daemon supervising configuration, display events, player lifecycle, tray icon, and IPC. | User Brief | Sec 6.2 | USER-REQUIRED | P0 | PLANNED | Decouples orchestration from media decoders for maximum system uptime and low idle RAM. | Standalone native Rust binary; maintains tray icon; supervises players; handles OS broadcasts. | Process inspection verifying runtime memory and tray responsiveness. | Win32 API, Rust STD | Thread-safety across IPC and Win32 event loops must be verified. | UDR-003 |
+| **KW-F-006** | Isolated Wallpaper Players | Media playback and web rendering run in isolated child processes out-of-process from the core daemon. | User Brief | Sec 6.2 | USER-REQUIRED | P0 | PLANNED | Decoder or browser crashes do not compromise the core controller daemon or Windows desktop. | Media decoders run in separate processes; killing a player does not terminate `kinetiwall-core`. | Process kill test terminating player process; assert core daemon logs crash and survives. | KW-F-005, Windows Process API | Inter-process HWND parenting requires synchronization. | UDR-003 |
+| **KW-F-007** | Ephemeral On-Demand UI Process | Gallery and settings UI runs as an on-demand process that terminates completely when closed; never lingering in background. | User Brief | Sec 6.2, 6.11 | USER-REQUIRED | P0 | PLANNED | Prevents 50–150 MB UI framework memory bloat while wallpaper runs in background. | Closing gallery UI window completely terminates the UI process within 1.0s; core daemon continues. | Process monitoring during and after closing gallery UI window. | KW-F-005, KW-NG-001 | Requires fast UI cold boot times (<1.5s). | UDR-003 |
+| **KW-F-008** | Secure Named Pipe IPC | Daemon, UI, and players communicate via Windows Named Pipes with strict schema validation. | Approved Decision | Sec 6.2 | TECHNICAL-DECISION | P0 | PLANNED | Fast, low-overhead local IPC with native Windows SID access security. | Pipe DACL restricted to current user SID; schema-validated payloads; command latency < 15ms. | IPC benchmark measuring throughput, latency, and rejection of malformed messages. | Windows Named Pipes, `serde` | Audio FFT arrays must not block high-priority command messages. | UDR-003 |
+| **KW-F-009** | Bounded Player Supervision | Core daemon enforces bounded restart policy (max 3 restarts in 60s) with exponential backoff on player crash. | Research Doc | Sec 6.2, 7.2 | TECHNICAL-DECISION | P1 | PLANNED | Prevents infinite crash loops from consuming 100% CPU and spamming event logs. | Restarts tracked per display; suspends auto-restarts after 3 crashes in 60s; alerts user via tray notification. | Crash injection test asserting supervisor halts restarts after 3 attempts. | KW-F-005, KW-F-006 | Must reset error counters after 5 minutes of continuous successful playback. | UDR-003 |
+
+---
+
+### 2.3 Wallpaper Playback & Media Engine
+
+| ID | Title | Statement | Source | Source Ref | Class | Pri | Status | Rationale | Acceptance Criteria | Verification Method | Dependencies | Risks & Constraints | Architecture Decision |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **KW-F-010** | Core Video Containers (MP4, WebM, AVI) | Video player decodes and renders MP4, WebM, and AVI container formats with standard modern video codecs. | User Brief | Sec 6.3 | USER-REQUIRED | P0 | PLANNED | Satisfies >90% of user media clips and live wallpapers. | Plays test files in H.264/AVC, H.265/HEVC, VP8, VP9; scales cleanly to display dimensions. | Media test suite verifying decode and presentation timestamps on test media. | Media Decoder (libmpv or WMF) | Codec availability on Windows N editions missing Media Feature Pack. | UDR-004, UDR-005 |
+| **KW-F-011** | Extended Container Evaluation (MKV) | Evaluate and support Matroska (`.mkv`) container playback subject to decoder and licensing constraints. | Research Doc | Sec 6.3 | RESEARCH-RECOMMENDATION | P2 | PLANNED | Popular container in enthusiast video collections. | Plays standard H.264/HEVC/VP9 streams inside MKV containers without crashing on unsupported subtitle tracks. | Media verification test loading reference MKV clips. | KW-F-010 | WMF native MKV support has codec limitations compared to libmpv/FFmpeg. | UDR-004, UDR-005 |
+| **KW-F-012** | Hardware-Accelerated Decoding | Offload video decoding to GPU (D3D11VA, DXVA2) by default. | User Brief | Sec 6.3, 7.1 | USER-REQUIRED | P0 | PLANNED | Keeps CPU usage under 2–3%, preventing laptop battery drain and thermal throttling. | Initializes hardware decode context; 1080p60 H.264 CPU usage ≤ 3.0% on reference hardware; Direct3D swapchain rendering. | Benchmark measuring CPU and GPU decode engine counters during playback. | Direct3D 11, GPU Drivers | Older iGPUs or VM virtual adapters may fail HW init; requires fallback. | UDR-004 |
+| **KW-F-013** | Seamless Gapless Looping | Loop video clips smoothly without visible black frames, stutter, audio pops, or dropped frames at the boundary. | User Brief | Sec 6.3 | USER-REQUIRED | P0 | PLANNED | Visible stutter every few seconds ruins wallpaper immersion. | Inter-frame jitter at loop boundary < 16.6ms at 60Hz; zero black or cleared frames presented. | Frame-time profiling over 50 consecutive loop transitions. | KW-F-010, KW-F-012 | Seek/flush latency in decoders requires pre-buffering or double-buffering. | UDR-004 |
+| **KW-F-014** | Video Playback Controls | Provide responsive Play, Pause, Stop, Seek, Volume, and Mute controls via IPC. | User Brief | Sec 6.3 | USER-REQUIRED | P1 | PLANNED | Essential user control over media playback and system audio mixing. | Pause halts within 50ms; Volume adjusts smoothly without popping; default audio is muted. | IPC command integration test asserting decoder state changes. | KW-F-008, KW-F-010 | None. | UDR-004 |
+| **KW-F-015** | Software Decoding Fallback | Fallback automatically to software CPU decoding if GPU hardware acceleration fails. | User Brief | Sec 6.3, 7.2 | USER-REQUIRED | P1 | PLANNED | Prevents black screens on unsupported hardware or broken graphics drivers. | Hardware init failure triggers software decode fallback; playback continues; logs warning. | Test with disabled HW acceleration flags; verify successful CPU decoding. | KW-F-010, KW-F-012 | Higher CPU utilization in software mode; UI must display warning. | UDR-004 |
+
+---
+
+### 2.4 Interactive Web Wallpapers
+
+| ID | Title | Statement | Source | Source Ref | Class | Pri | Status | Rationale | Acceptance Criteria | Verification Method | Dependencies | Risks & Constraints | Architecture Decision |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **KW-F-016** | Interactive Web Runtime | Render HTML5, CSS animations, JavaScript, Canvas 2D, and WebGL2 interactive wallpapers. | User Brief | Sec 6.4 | USER-REQUIRED | P0 | PLANNED | Enables interactive clocks, generative art, and particle simulations. | Executes modern web standards and WebGL2 shaders at steady 60 FPS on capable hardware. | WebGL particle simulation benchmark verifying framerate and zero JS errors. | Web Engine (WebView2) | Higher memory usage (80–180 MB) than video players. | UDR-006, UDR-010 |
+| **KW-F-017** | Microsoft Edge WebView2 Hosting | Host Chromium-based WebView2 embedded within a borderless Win32 window behind desktop icons. | Approved Decision | Sec 6.4 | TECHNICAL-DECISION | P0 | PLANNED | Uses system-installed browser engine; avoids bundling massive Chromium binaries. | Embedded `CoreWebView2Controller`; disables devtools, context menus, and scrollbars; isolates cache. | Integration test instantiating WebView2 controller behind desktop icons. | WebView2 Runtime, Win32 API | Systems without WebView2 need installation detection and guidance. | UDR-006 |
+| **KW-F-018** | Web Security Sandbox & Isolation | Restrict web wallpaper access to local filesystem, command execution, and local network. | User Brief | Sec 6.4, 7.3 | USER-REQUIRED | P0 | PLANNED | Protects host from malicious scripts in third-party web wallpapers. | Serves via virtual host mapping (`https://kinetiwall.local/`); blocks `file://`; denies camera/mic/notifications. | Penetration test attempting to read system files from web wallpaper JS. | KW-F-017 | Must allow relative paths to local assets within the wallpaper directory. | UDR-010 |
+| **KW-F-019** | Web Customization Bridge | Inject `window.kinetiwall` JS API for dynamic property changes and audio FFT data stream. | User Brief | Sec 6.4, 6.10 | USER-REQUIRED | P1 | PLANNED | Enables web wallpapers to respond to user settings and music in real time. | Delivers property updates via `onPropertyChange`; delivers normalized FFT spectrum arrays via `onAudioData`. | Integration test verifying IPC message delivery to web page DOM. | KW-F-017, KW-F-031, KW-F-038 | JSON serialization overhead of FFT data must be optimized. | UDR-010 |
+
+---
+
+### 2.5 Multi-Monitor Management
+
+| ID | Title | Statement | Source | Source Ref | Class | Pri | Status | Rationale | Acceptance Criteria | Verification Method | Dependencies | Risks & Constraints | Architecture Decision |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **KW-F-020** | Per-Display Independent Mode | Assign distinct independent wallpapers and settings to each active monitor. | User Brief | Sec 6.5 | USER-REQUIRED | P0 | PLANNED | Multi-monitor users expect independent control per display. | Enumerates monitors; assigns separate wallpaper, engine, and volume profile per display HWND. | Multi-monitor test fixture verifying independent rendering across 2+ displays. | Win32 Multi-Monitor API | Multiple video players increase GPU decode session count. | UDR-009 |
+| **KW-F-021** | Multi-Display Spanning Mode | Span a single panoramic wallpaper across the combined virtual desktop bounds of all monitors. | User Brief | Sec 6.5 | USER-REQUIRED | P1 | PLANNED | Ultra-wide and multi-monitor setups benefit from seamless panoramic scenes. | Computes virtual desktop bounding box; scales unified wallpaper across all display coordinates. | Layout test verifying virtual screen calculation across multi-monitor topology. | Win32 Virtual Screen Metrics | Mismatched monitor resolutions/DPI cause bezel alignment discontinuities. | UDR-009 |
+| **KW-F-022** | Multi-Display Duplicate/Clone Mode | Duplicate the same wallpaper across all displays with synchronized frame playback and single audio. | User Brief | Sec 6.5 | USER-REQUIRED | P1 | PLANNED | Ideal for mirrored displays or synchronized ambient aesthetics. | Presents identical wallpaper across all monitors; video playback is synchronized without audio echo. | Multi-monitor test asserting identical frame presentation and single audio stream. | KW-F-020 | Independent decoders drift; requires shared clock or shared texture presentation. | UDR-009 |
+| **KW-F-023** | Display Hotplug & Topology Handling | Dynamically adapt to monitor connect/disconnect, resolution changes, and orientation shifts without restart. | User Brief | Sec 6.5 | USER-REQUIRED | P0 | PLANNED | Mobile laptops frequently connect and disconnect from external displays. | Intercepts `WM_DISPLAYCHANGE`; re-enumerates monitors and updates window geometry within 500ms. | Simulated display change test sending `WM_DISPLAYCHANGE`; assert layout adaptation. | Win32 `WM_DISPLAYCHANGE` | Rapid docking can produce bursts of events; requires 500ms debounce. | UDR-009 |
+| **KW-F-024** | Per-Monitor V2 DPI Scaling | All windows adapt dynamically to `WM_DPICHANGED` across mixed-DPI multi-monitor environments. | Approved Decision | Sec 6.5, 7.5 | TECHNICAL-DECISION | P0 | PLANNED | Prevents blurred rendering and coordinate drift on mixed-scaling setups. | Manifest declares `PerMonitorV2`; window bounds and swapchains match physical pixel dimensions. | Multi-DPI testing across 100%, 150%, and 200% displays. | Win32 DPI API | None. | UDR-009 |
+
+---
+
+### 2.6 Foreground Detection & Resource Management
+
+| ID | Title | Statement | Source | Source Ref | Class | Pri | Status | Rationale | Acceptance Criteria | Verification Method | Dependencies | Risks & Constraints | Architecture Decision |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **KW-F-025** | Fullscreen Game & App Detection | Detect exclusive or borderless fullscreen applications and trigger resource-saving states within 150ms. | User Brief | Sec 6.6, 7.1 | USER-REQUIRED | P0 | PLANNED | Wallpapers must not steal GPU or CPU resources from games or 3D benchmarks. | Detects foreground window matching/exceeding monitor bounds or `QUNS_RUNNING_D3D_FULL_SCREEN` within 150ms. | Automated test launching a borderless fullscreen window; assert detection. | Win32 Shell API | Desktop shell overlays must be filtered to prevent false positives. | UDR-007 |
+| **KW-F-026** | Discrete Deactivation States | Implement distinct states: Playback Paused, Rendering Suspended, Player Stopped, Static Fallback. | User Brief | Sec 6.6 | USER-REQUIRED | P0 | PLANNED | Provides flexible tradeoffs between rapid resume and maximum resource freeing. | Paused: CPU drops to 0.0% in 100ms; Stopped: releases GPU video surfaces; Resume < 50ms from pause. | Performance profiling verifying thread states and VRAM allocations across states. | KW-F-014, KW-F-025 | Re-initializing a stopped player process incurs higher latency than resuming pause. | UDR-008 |
+| **KW-F-027** | Maximized Window Occlusion | Detect when a monitor's desktop is fully occluded by maximized windows and pause wallpaper on that monitor. | Approved Decision | Sec 6.6 | TECHNICAL-DECISION | P1 | PLANNED | Rendering wallpaper behind opaque maximized windows needlessly consumes power. | Detects foreground window is `IsZoomed` covering work area; pauses rendering on that monitor. | Occlusion test maximizing a window on Monitor 1 while leaving Monitor 2 clear. | KW-F-020, KW-F-026 | Translucent windows (Mica/Acrylic) may require configurable occlusion sensitivity. | UDR-007 |
+| **KW-F-028** | Event-Driven Window Hooks | Track foreground and window state changes using `SetWinEventHook` rather than high-frequency polling. | Research Doc | Sec 6.6, 7.1 | TECHNICAL-DECISION | P0 | PLANNED | Eliminates constant timer wakeups, preserving laptop battery life. | Uses `EVENT_SYSTEM_FOREGROUND` and `EVENT_OBJECT_LOCATIONCHANGE`; idle CPU < 0.1%. | CPU profiler trace during 10-minute idle desktop; verify absence of busy loops. | Win32 Event Hooks | Event hooks can miss events during lock screen; requires 2000ms safety watchdog. | UDR-007 |
+
+---
+
+### 2.7 Laptop Power Management
+
+| ID | Title | Statement | Source | Source Ref | Class | Pri | Status | Rationale | Acceptance Criteria | Verification Method | Dependencies | Risks & Constraints | Architecture Decision |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **KW-F-029** | Battery Mode Adaptation | Detect transition to battery power and execute configured policy (pause, throttle FPS, or static image). | User Brief | Sec 6.7 | USER-REQUIRED | P0 | PLANNED | Maximizes laptop battery life when running untethered. | Intercepts `WM_POWERBROADCAST`; detects `ACLineStatus == 0`; triggers policy within 1.0s. | Power broadcast simulation test; assert policy execution and AC recovery. | Win32 Power API | None. | UDR-008 |
+| **KW-F-030** | Windows Battery Saver Integration | Automatically pause all rendering engines when Windows Battery Saver mode is engaged. | Approved Decision | Sec 6.7 | TECHNICAL-DECISION | P1 | PLANNED | Honors the operating system's explicit low-power state. | Detects `SystemStatusFlag == 1`; immediately pauses or stops all active players. | Simulated Battery Saver toggle; assert player pause. | KW-F-029 | None. | UDR-008 |
+
+---
+
+### 2.8 Audio Visualization Engine
+
+| ID | Title | Statement | Source | Source Ref | Class | Pri | Status | Rationale | Acceptance Criteria | Verification Method | Dependencies | Risks & Constraints | Architecture Decision |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **KW-F-031** | WASAPI Loopback Capture | Capture system audio output using WASAPI in loopback mode exclusively when an audio-reactive wallpaper is active. | User Brief | Sec 6.8 | USER-REQUIRED | P1 | PLANNED | Delivers real-time system audio data to drive visual effects in sync with music. | Opt-in capture from default render endpoint; terminates capture thread when no audio wallpaper is active. | Audio test playing test tone; assert captured PCM samples in volatile memory. | Windows WASAPI | Requires endpoint re-init when user changes default playback device. | KW-NG-005 |
+| **KW-F-032** | Real-Time FFT Spectrum Analysis | Compute real-time FFT spectrum analysis into normalized frequency bands and stream to active players. | User Brief | Sec 6.8 | USER-REQUIRED | P1 | PLANNED | Wallpapers need frequency magnitude bins rather than raw audio waveforms. | Dedicated thread runs FFT (Hann window, 1024/2048); streams 30–60 updates/sec; CPU overhead < 0.5%. | DSP test feeding known sine waves; assert dominant peaks in corresponding FFT bins. | KW-F-031, Rust DSP | High-frequency IPC data transfer must avoid heap fragmentation. | KW-F-019 |
+| **KW-F-033** | Audio Privacy & Dynamic Switching | Process audio strictly in memory without recording; sleep during silence; re-bind on device change. | User Brief | Sec 6.8, 7.4 | USER-REQUIRED | P0 | PLANNED | Guarantees privacy against eavesdropping and eliminates idle CPU drain. | Zero audio recording or network code; sleeps after >3s silence; auto-rebinds within 500ms on device change. | Privacy audit verifying no audio disk writes; device switch test asserting recovery. | KW-F-031, KW-F-032 | None. | KW-NG-005 |
+
+---
+
+### 2.9 Wallpaper Library & Asset Management
+
+| ID | Title | Statement | Source | Source Ref | Class | Pri | Status | Rationale | Acceptance Criteria | Verification Method | Dependencies | Risks & Constraints | Architecture Decision |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **KW-F-034** | Local Media & Package Import | Support importing local video files and web wallpaper directories via drag-and-drop or file dialog. | User Brief | Sec 6.9 | USER-REQUIRED | P0 | PLANNED | Users must easily add their own video clips and web packages to their library. | Imports MP4, WebM, AVI, and web folders; validates structure; adds to local library catalog. | Automated file import test suite validating catalog entries. | Filesystem API, KW-F-010 | Very large files (>2GB) should be linked rather than duplicated. | UDR-010 |
+| **KW-F-035** | Local Metadata Store | Store wallpaper metadata (title, tags, properties, favorites) in an embedded local database (SQLite/JSON). | Approved Decision | Sec 6.9 | TECHNICAL-DECISION | P1 | PLANNED | Fast search, filtering, and sorting across thousands of assets without re-scanning disk. | Queries execute in <20ms for 10,000 items; schema versioning and automatic migration support. | Performance benchmark querying 5,000 items in local store. | Embedded SQLite or JSON store | Database corruption recovery mechanism required. | UDR-010 |
+| **KW-F-036** | Thumbnail Generation & Cache | Automatically extract representative video frames or web snapshots and cache preview thumbnails. | User Brief | Sec 6.9 | USER-REQUIRED | P1 | PLANNED | Fast gallery scrolling requires pre-computed thumbnail images. | Extracts frame at 10% timestamp; saves WebP/JPEG thumbnail; runs in background without UI lag. | Test importing 20 video files; assert 20 valid thumbnail files generated in cache. | KW-F-010, Image Crate | Video decode extraction must prioritize visible viewport items. | UDR-010 |
+| **KW-F-037** | Library Search, Filtering & Favorites | Provide real-time search by title/tag, filter by wallpaper type, and toggle favorites. | User Brief | Sec 6.9 | USER-REQUIRED | P1 | PLANNED | Rapid organization and retrieval of growing wallpaper collections. | Search updates results in <50ms; filters isolate video/web; favorites persist across restarts. | UI functional test executing search queries and filter combinations. | KW-F-035 | None. | UDR-010 |
+
+---
+
+### 2.10 Customization & Property Bridge
+
+| ID | Title | Statement | Source | Source Ref | Class | Pri | Status | Rationale | Acceptance Criteria | Verification Method | Dependencies | Risks & Constraints | Architecture Decision |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **KW-F-038** | Runtime Property Customization | Adjust wallpaper playback speed, brightness, saturation, volume, and custom sliders/colors live via IPC. | User Brief | Sec 6.10 | USER-REQUIRED | P1 | PLANNED | Personalize wallpaper aesthetics without reloading or restarting player processes. | Slider change updates running wallpaper in <30ms; color picker updates shader uniforms live. | Integration test verifying IPC property update dispatch to running player. | KW-F-008, KW-F-014, KW-F-019 | Video color adjustments require hardware shader support or video filters. | UDR-010 |
+| **KW-F-039** | Property Schema Validation | Declare custom properties in JSON manifest; strictly validate, clamp, and sanitize values before applying. | Approved Decision | Sec 6.10 | TECHNICAL-DECISION | P1 | PLANNED | Prevents out-of-range values (e.g. `NaN`, negative speed) from crashing players. | Validates property types; clamps out-of-range numbers; handles malformed schemas gracefully. | Unit tests exercising schema parser with valid, out-of-bound, and malformed JSON. | `serde` JSON parser | Compatibility with third-party manifest schemas (Lively/Wallpaper Engine). | UDR-010 |
+| **KW-F-040** | Reliable Configuration Persistence | Persist user settings and monitor assignments atomically to disk (`settings.json`) with backup protection. | User Brief | Sec 6.10 | USER-REQUIRED | P0 | PLANNED | Settings must survive sudden system power loss or process kill. | Writes via atomic file replacement (`write temp` -> `FlushFileBuffers` -> `MoveFileExW`); versioned schema. | Sudden process kill test during save; assert file integrity upon restart. | Win32 Filesystem API | None. | UDR-010 |
+
+---
+
+### 2.11 System Tray & Application Lifecycle
+
+| ID | Title | Statement | Source | Source Ref | Class | Pri | Status | Rationale | Acceptance Criteria | Verification Method | Dependencies | Risks & Constraints | Architecture Decision |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **KW-F-041** | System Tray Quick Controls | Display tray icon with responsive context menu (Gallery, Play/Pause, Next, Mute, Display, Exit). | User Brief | Sec 6.11 | USER-REQUIRED | P0 | PLANNED | Unintrusive, quick access to core controls without taskbar clutter. | Registers via `Shell_NotifyIconW`; right-click menu opens in <50ms; restores icon on `TaskbarCreated`. | Win32 message test asserting tray registration and menu dispatch. | Win32 Shell API | DPI scaling of tray icon assets across mixed-DPI displays. | UDR-003 |
+| **KW-F-042** | Run on Windows Startup | Provide optional setting to start silently into system tray on Windows user login via `HKCU\...\Run`. | User Brief | Sec 6.11 | USER-REQUIRED | P1 | PLANNED | Live wallpapers are expected to be active automatically upon desktop login. | Creates/removes `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` entry; launches silently to tray. | Registry inspection and startup command line parameter test. | Windows Registry API | Antivirus software monitors `Run` key writes; clear intent required. | UDR-003 |
+| **KW-F-043** | Single-Instance Enforcement | Enforce single-instance policy per user session using a named Mutex; second launch focuses existing instance. | Approved Decision | Sec 6.11 | TECHNICAL-DECISION | P0 | PLANNED | Prevents duplicate background daemons, multiple tray icons, and conflicting window attachments. | Creates named session mutex; second instance signals existing daemon to open UI and exits in <200ms. | Launch collision test; assert only one core process remains active. | Win32 `CreateMutexW` | Mutex abandonment must be handled cleanly. | UDR-003 |
+
+---
+
+### 2.12 Native 3D & Executable Integration
+
+| ID | Title | Statement | Source | Source Ref | Class | Pri | Status | Rationale | Acceptance Criteria | Verification Method | Dependencies | Risks & Constraints | Architecture Decision |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **KW-F-044** | Native 3D Executable Hosting Evaluation | Evaluate feasibility, security boundaries, and lifecycle of hosting standalone 3D executables (Unity/Godot). | Research Doc | Sec 6.12 | RESEARCH-RECOMMENDATION | P3 | UNRESOLVED | Proposed in research to support complex 3D scenes; requires strict risk analysis. | Feasibility and security study documenting window parenting risks, anti-cheat conflicts, and crash risks. | Architectural spike evaluating `SetParent` vs out-of-process IPC rendering. | Win32 Window Parenting | Running unsigned executables poses severe malware and stability risks. | UDR-011 |
+
+---
+
+### 2.13 Offline Operation & Dependency Packaging
+
+| ID | Title | Statement | Source | Source Ref | Class | Pri | Status | Rationale | Acceptance Criteria | Verification Method | Dependencies | Risks & Constraints | Architecture Decision |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **KW-F-045** | 100% Offline Core Operability | All core wallpaper playback, library management, and customization must work completely offline. | User Brief | Sec 6.13, 7.4 | USER-REQUIRED | P0 | PLANNED | Users must never be prevented from using desktop customization during internet outages. | Functions 100% with network adapters disabled; zero blocking network timeouts or failed requests. | Offline test suite executed on network-disabled machine; assert full pass. | Local storage & database | None. | UDR-006 |
+| **KW-F-046** | Self-Contained Dependency Packaging | Bundle all required runtime libraries in offline installer or rely strictly on standard Windows runtimes. | User Brief | Sec 6.13, 7.8 | USER-REQUIRED | P0 | PLANNED | Eliminates failed installations caused by missing online downloaders or blocked firewalls. | Installs and runs successfully on an air-gapped machine; clear detection/bundling for WebView2. | Clean installation on isolated offline Windows 10/11 virtual machine. | Installer framework | Bundling fixed-version WebView2 increases installer size by ~150MB. | UDR-006 |
+
+---
+
+## 3. Non-Functional Requirements Traceability Matrix (KW-NF)
+
+### 3.1 Performance & Resource Efficiency
+
+| ID | Title | Statement | Source | Source Ref | Class | Pri | Status | Rationale | Acceptance Criteria | Verification Method | Dependencies | Risks & Constraints | Architecture Decision |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **KW-NF-001** | Idle Core Controller RAM | Daemon private working set RAM remains ≤ 15 MB (provisional target: < 10 MB) when UI is closed. | User Brief & Research | Sec 7.1 | TECHNICAL-DECISION | P0 | PROVISIONAL | Background utility must not crowd out active applications. | Measured Private Working Set ≤ 15.0 MB during continuous 1-hour idle monitoring. | Automated performance benchmark sampling `Process.WorkingSet64` over 60 mins. | Pure Rust implementation | Handle and pipe buffers must be managed to avoid leaks. | UDR-013 |
+| **KW-NF-002** | Idle Core Controller CPU | Core controller consumes < 0.1% average CPU utilization when idle on desktop. | User Brief & Research | Sec 7.1 | TECHNICAL-DECISION | P0 | PROVISIONAL | Background daemons must not prevent CPU core sleep states. | Average CPU over 10-minute idle desktop < 0.10%; uses blocking OS waits, no busy loops. | Windows Performance Toolkit trace capturing CPU thread execution states. | KW-F-028 | Global Windows timer resolution must not be forced to 1ms. | UDR-013 |
+| **KW-NF-003** | Active Video Player CPU | 1080p60 H.264 hardware-accelerated playback consumes ≤ 3.0% CPU on reference quad-core hardware. | User Brief & Research | Sec 7.1 | USER-REQUIRED | P0 | PROVISIONAL | Video decoding must be offloaded to dedicated GPU fixed-function hardware. | Average CPU ≤ 3.0% over 5-minute playback; 3D GPU engine utilization ≤ 5.0%. | Benchmark measuring CPU and GPU engine performance counters. | KW-F-012 | High-bitrate 4K VP9/AV1 may require higher CPU baseline. | UDR-004, UDR-013 |
+| **KW-NF-004** | Rapid Suspension Latency | Halt rendering and suspend video decoding within 100 ms (provisional target: < 50 ms) of pause event. | User Brief & Research | Sec 7.1 | TECHNICAL-DECISION | P0 | PROVISIONAL | Immediate pause prevents framerate stutter during game launch. | Time between trigger event and last swapchain frame ≤ 100 ms; CPU drops to 0.0% in <150ms. | Timestamped event logging capturing trigger vs decoder pause confirmation. | KW-F-025, KW-F-026 | Non-blocking pipe messaging and decoder synchronization required. | UDR-007, UDR-013 |
+| **KW-NF-005** | Zero Gaming Frame-Time Impact | 0.0% degradation in 99th percentile frame times or average FPS in fullscreen games when paused. | User Brief | Sec 7.1 | USER-REQUIRED | P0 | PLANNED | Gamers will uninstall any customization tool that degrades gaming smoothness. | 3D benchmark exhibits statistically indistinguishable FPS (±0.5%) paused vs uninstalled. | Comparative benchmark running 10 iterations of graphics test active vs uninstalled. | KW-F-025, KW-F-026 | Verify across both NVIDIA and AMD driver architectures. | UDR-007, UDR-013 |
+| **KW-NF-006** | Compact Installer Size | Core standalone installer achieves compressed distribution size ≤ 35 MB (provisional target: < 25 MB). | Research Doc | Sec 7.8 | RESEARCH-RECOMMENDATION | P2 | PROVISIONAL | Compact downloads improve adoption and reduce bandwidth overhead. | Production release installer `.exe` byte size ≤ 35.0 MB. | Build artifact inspection measuring installer binary size in release CI. | Rust LTO, opt-level = "z" | Bundling full static libmpv or offline WebView2 will exceed 35MB. | UDR-005, UDR-006 |
+
+---
+
+### 3.2 Reliability, Recovery & Resilience
+
+| ID | Title | Statement | Source | Source Ref | Class | Pri | Status | Rationale | Acceptance Criteria | Verification Method | Dependencies | Risks & Constraints | Architecture Decision |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **KW-NF-007** | 72-Hour Continuous Stability | Run continuously for at least 72 hours of uninterrupted playback without crashing or leaking memory. | User Brief | Sec 7.2 | USER-REQUIRED | P0 | PLANNED | Live wallpapers run indefinitely as part of the operating system shell. | Zero unhandled crashes across 72 hours; memory growth ≤ 10% of initial baseline. | 72-hour continuous stress test logging memory, handles, and playback state every 5m. | KW-F-005, KW-F-006, KW-F-010 | Third-party decoders must be audited for unmanaged leaks. | UDR-004 |
+| **KW-NF-008** | Sleep / Modern Standby Recovery | Handle S3/S0ix sleep and resume cleanly, rebuilding Direct3D swapchains within 2.0s of wake. | User Brief | Sec 7.2 | USER-REQUIRED | P0 | PLANNED | Sleep/wake cycles frequently reset Direct3D device contexts (`DXGI_ERROR_DEVICE_RESET`). | Intercepts `WM_POWERBROADCAST`; restores live rendering within 2.0s of wake without user input. | Automated sleep/wake cycle testing via Windows Power Management scripts. | Win32 Power API, Direct3D | Device removed errors require rebuilding swapchains from scratch. | UDR-004 |
+| **KW-NF-009** | Corrupt Media Resilience | Truncated or corrupt media files fail safely without crashing player processes or freezing Windows shell. | User Brief | Sec 7.2 | USER-REQUIRED | P1 | PLANNED | Users will encounter malformed downloads or unsupported codec profiles. | Parser detects invalid headers; transitions to error state; logs error; notifies UI. | Fuzz testing injecting corrupted, zero-byte, and truncated video files. | KW-F-010, KW-F-015 | None. | UDR-004 |
+| **KW-NF-010** | Job Object Process Guardrails | Assign all player subprocesses to a Windows Job Object with `KILL_ON_JOB_CLOSE` to kill orphans. | Approved Decision | Sec 7.2, 7.3 | TECHNICAL-DECISION | P1 | PLANNED | Guarantees kernel-level cleanup of all child rendering processes if daemon terminates. | Job Object configured; killing `kinetiwall-core` terminates all child player processes immediately. | Kill test terminating parent process and verifying child process destruction via PowerShell. | Windows Job Object API | Compatibility with WebView2 child processes must be verified. | UDR-003 |
+
+---
+
+### 3.3 Security & Sandboxing
+
+| ID | Title | Statement | Source | Source Ref | Class | Pri | Status | Rationale | Acceptance Criteria | Verification Method | Dependencies | Risks & Constraints | Architecture Decision |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **KW-NF-011** | Least-Privilege Execution | Execute entirely within standard non-elevated user context; never requiring Administrator privileges. | User Brief | Sec 7.3 | USER-REQUIRED | P0 | PLANNED | Running customization tools as Administrator exposes host system to privilege escalation attacks. | Manifest declares `requestedExecutionLevel level="asInvoker"`; all features work without UAC prompts. | Security audit executing inside standard non-admin account; assert zero UAC prompts. | Windows UAC | None. | UDR-010 |
+| **KW-NF-012** | Named Pipe DACL Security | Restrict Named Pipe connections exclusively to current user SID, rejecting unauthorized local access. | Approved Decision | Sec 7.3 | TECHNICAL-DECISION | P0 | PLANNED | Open named pipes allow unprivileged local processes to inject commands or hijack execution. | Pipe created with SID-restricted DACL; connections from other accounts fail with access denied. | Security test running unprivileged secondary account attempting pipe connection. | Windows Security API | None. | UDR-003 |
+| **KW-NF-013** | Strict IPC Schema Validation | Validate all IPC payloads against strict schemas; reject oversized (>64KB/1MB) or malformed packets. | Approved Decision | Sec 7.3 | TECHNICAL-DECISION | P0 | PLANNED | Protects against buffer overflows, denial-of-service, and command injection attacks. | Deserializer rejects unknown fields or payloads exceeding byte limits; resets connection cleanly. | Fuzzing test sending malformed and oversized byte sequences to IPC listener. | `serde` deserializer | None. | UDR-003 |
+| **KW-NF-014** | Zip Slip Archive Protection | Forbid directory traversal (`../`, absolute paths, symlinks) during wallpaper archive extraction. | Approved Decision | Sec 7.3 | TECHNICAL-DECISION | P0 | PLANNED | Malicious wallpaper archives could attempt to overwrite auto-start programs or system files. | Canonical path validation ensures all extracted files reside inside target destination directory. | Security test attempting extraction of zip containing `../../evil.exe`; assert abort. | Secure archive library | None. | UDR-010 |
+| **KW-NF-015** | Dependency Vulnerability Audits | Continuous automated security audits (`cargo audit`, `npm audit`) with zero high/critical CVEs allowed. | Approved Decision | Sec 7.3 | TECHNICAL-DECISION | P1 | PLANNED | Guarantees third-party dependencies are free from known exploits and vulnerabilities. | CI pipeline runs `cargo audit` and `cargo deny`; builds fail on unpatched high-severity CVEs. | Automated CI security scan step execution. | `cargo-audit`, `cargo-deny` | Requires timely updates when upstream vulnerabilities are discovered. | UDR-005 |
+| **KW-NF-016** | Web Sandbox Storage Segregation | WebView2 user data folder isolated from host Edge browser cookies, credentials, and passwords. | User Brief | Sec 7.3 | USER-REQUIRED | P0 | PLANNED | Prevents web wallpapers from accessing user web sessions or saved passwords. | User data folder points to `%LOCALAPPDATA%\KinetiWall\web_cache`; cannot read host Edge credentials. | Inspection of WebView2 initialization parameters and directory isolation. | KW-F-017, KW-F-018 | None. | UDR-010 |
+
+---
+
+### 3.4 Privacy & User Sovereignty
+
+| ID | Title | Statement | Source | Source Ref | Class | Pri | Status | Rationale | Acceptance Criteria | Verification Method | Dependencies | Risks & Constraints | Architecture Decision |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **KW-NF-017** | Absolute Telemetry Prohibition | Zero telemetry SDKs, analytics tracking, behavioral logging, or outbound network reporting. | User Brief | Sec 7.4 | USER-REQUIRED | P0 | PLANNED | User desktop customization utilities have no justification for tracking user habits. | Zero telemetry dependencies in codebase; zero outbound network packets over 24-hour capture. | Static binary string inspection and dynamic Wireshark packet capture analysis. | KW-NG-002 | Crash debugging relies on local opt-in logs rather than automated remote dumps. | UDR-012 |
+| **KW-NF-018** | Anti-Screen-Scraping Guarantee | Never capture desktop screenshots, scrape pixels, or inspect open window contents. | User Brief | Sec 7.4 | USER-REQUIRED | P0 | PLANNED | Customization tools must not act as covert surveillance tools or spyware. | Queries only window bounds and styles; never invokes `PrintWindow` or graphics capture APIs. | Source code audit confirming absence of screen capture APIs. | KW-F-025 | None. | UDR-007 |
+| **KW-NF-019** | Account-Free Sovereign Operation | Never prompt for account creation, email registration, or online login for any feature. | User Brief | Sec 7.4 | USER-REQUIRED | P0 | PLANNED | Guarantees complete user sovereignty and frictionless setup without vendor lock-in. | Complete installation, playback, and customization lifecycle proceeds with zero account dialogs. | Manual walkthrough of all user flows verifying zero registration prompts. | KW-NG-003 | None. | UDR-012 |
+
+---
+
+### 3.5 Usability, Ergonomics & Accessibility
+
+| ID | Title | Statement | Source | Source Ref | Class | Pri | Status | Rationale | Acceptance Criteria | Verification Method | Dependencies | Risks & Constraints | Architecture Decision |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **KW-NF-020** | Progressive Disclosure UI | 1-click wallpaper selection for beginners; advanced multi-monitor/shader settings in sub-views. | User Brief | Sec 7.5 | USER-REQUIRED | P1 | PLANNED | Avoids overwhelming casual users while providing deep customization for power users. | Clean initial visual grid with immediate "Apply"; advanced tabs cleanly separated. | Usability walkthrough verifying key task completion within 3 clicks from launch. | KW-F-007 | None. | UDR-003 |
+| **KW-NF-021** | Actionable Error Messaging | User-facing errors provide plain-language explanations and actions; technical logs saved to disk. | User Brief | Sec 7.5 | USER-REQUIRED | P1 | PLANNED | Cryptic error codes frustrate users and cause avoidable support tickets. | UI dialogs contain title, explanation, and action button; stack traces saved to log file. | Fault injection test validating UI error presentation and log file contents. | KW-F-007, KW-F-041 | None. | UDR-003 |
+| **KW-NF-022** | Keyboard & Accessibility Navigation | Gallery UI supports keyboard navigation (Tab, Arrows, Enter, Esc), visible focus, and ARIA labels. | Approved Decision | Sec 7.5 | TECHNICAL-DECISION | P2 | PLANNED | Ensures accessibility for users relying on keyboard navigation or screen readers. | All gallery items and controls can be navigated and activated via keyboard alone. | Accessibility audit and manual keyboard-only navigation test. | KW-F-007 | None. | UDR-003 |
+
+---
+
+### 3.6 Operating System Compatibility & Deployment
+
+| ID | Title | Statement | Source | Source Ref | Class | Pri | Status | Rationale | Acceptance Criteria | Verification Method | Dependencies | Risks & Constraints | Architecture Decision |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **KW-NF-023** | Supported Windows OS Matrix | Support Windows 10 (Build 19041+) and Windows 11 (all builds) 64-bit x86_64; reject older OS cleanly. | User Brief | Sec 7.6 | USER-REQUIRED | P0 | PLANNED | Establishes modern Win32, WebView2, and Per-Monitor V2 DPI API baseline. | Installs and runs on Win 10 22H2 and Win 11 23H2/24H2; older builds display warning and exit safely. | Virtual machine test runs on Windows 10 (19041, 19045) and Windows 11 (22631, 26100). | Win32 API | Windows 11 24H2 shell changes must be verified. | UDR-001, UDR-002 |
+| **KW-NF-024** | Clean Uninstallation Footprint | Cleanly remove all binaries, registry keys, shortcuts, and offer wallpaper/config removal on uninstall. | User Brief | Sec 7.8 | USER-REQUIRED | P0 | PLANNED | Prevents polluting user systems with leftover background daemons or registry keys. | Terminates processes; removes binaries; deletes `Run` key; restores desktop wallpaper. | Clean install/uninstall cycle followed by filesystem and registry scanning for leftovers. | Installer framework | None. | UDR-006 |
+| **KW-NF-025** | Reproducible Native Rust Build | Core components build reproducibly using stable Rust toolchain with locked dependencies (`Cargo.lock`). | Approved Decision | Sec 7.7 | TECHNICAL-DECISION | P1 | PLANNED | Guarantees long-term maintainability, deterministic compilation, and auditability. | `cargo build --release` produces core binaries in <3 minutes without unmanaged scripts. | Clean build test: `cargo clean` followed by `cargo build --release`. | Rust Toolchain 1.80+ | C/C++ dependencies require MSVC build tools. | UDR-004, UDR-005 |
+
+---
+
+### 3.7 Maintainability & Code Architecture
+
+| ID | Title | Statement | Source | Source Ref | Class | Pri | Status | Rationale | Acceptance Criteria | Verification Method | Dependencies | Risks & Constraints | Architecture Decision |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **KW-NF-026** | Modular Cargo Workspace | Organize codebase into isolated crates: `core`, `player-video`, `player-web`, `ipc`, `common`. | Approved Decision | Sec 7.7 | TECHNICAL-DECISION | P0 | PLANNED | Prevents monolithic coupling and speeds up compilation while enforcing process boundaries. | Root `Cargo.toml` declares workspace members; zero circular dependencies between crates. | `cargo tree` and `cargo check --workspace` validation. | Cargo Workspace | None. | UDR-003 |
+| **KW-NF-027** | Automated Test Coverage Baseline | Core modules (IPC serialization, layout geometry, power state logic) maintain ≥ 75% test coverage. | Approved Decision | Sec 7.7 | TECHNICAL-DECISION | P1 | PLANNED | Guarantees regression prevention across subsequent development steps. | `cargo test --workspace` passes cleanly; code coverage tool reports ≥ 75% coverage. | CI automated test harness execution. | Rust Test Harness | Win32 GUI window interactions require mock window handles. | UDR-003 |
+
+---
+
+## 4. Explicit Non-Goals Traceability (KW-NG)
+
+| ID | Title | Anti-Goal Statement | Source | Classification | Priority | Status | Enforcement Mechanism |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **KW-NG-001** | No Resident Gallery UI | The gallery/settings UI process must terminate completely upon window close; never lingering in background. | User Brief, Sec 6.2, 6.11 | NON-GOAL | P0 | PLANNED | Window close triggers `std::process::exit(0)` on UI process; monitored by CI process lifetime tests. |
+| **KW-NG-002** | No Telemetry or Spyware | No telemetry SDKs, analytics tracking, behavioral logging, or outbound network reporting. | User Brief, Sec 7.4 | NON-GOAL | P0 | PLANNED | Codebase dependency ban enforced by `cargo deny`; Wireshark network capture in CI. |
+| **KW-NG-003** | No Mandatory Online Accounts | No required online accounts, email registration, OAuth authentication, or mandatory cloud logins. | User Brief, Sec 7.4 | NON-GOAL | P0 | PLANNED | Architecture verification; absence of authentication UI or remote login API endpoints. |
+| **KW-NG-004** | No Explorer Shell DLL Injection | No DLL injection into `explorer.exe` or hooking undocumented internal Windows kernel routines. | User Brief, Sec 6.1 | NON-GOAL | P0 | PLANNED | Architecture strictly uses standard Win32 window message negotiation (`SendMessageTimeoutW`). |
+| **KW-NG-005** | No Audio Recording or Disk Saving | No raw audio waveform serialization to disk, recording, or audio streaming over network. | User Brief, Sec 6.8, 7.4 | NON-GOAL | P0 | PLANNED | Code audit confirming WASAPI PCM buffers exist only in stack/volatile memory during FFT processing. |
+| **KW-NG-006** | No Unsandboxed Remote Executables | No downloading and executing arbitrary unsigned `.exe` binaries as wallpapers without sandboxing. | User Brief, Sec 6.12, 7.3 | NON-GOAL | P0 | PLANNED | Library import explicitly rejects `.exe`, `.bat`, `.cmd`, `.ps1` files from standard user import paths. |
+
